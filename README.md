@@ -102,14 +102,25 @@ The menu is the default: running with no command opens it, and
 `python3 gist_sync.py menu` opens the same menu. Auto mode never
 runs by itself; it is only menu option 1 (or the `auto` command).
 
+Move with the up/down arrow keys and confirm with Enter (q
+quits); the chosen line is highlighted. When arrow keys are not
+available, type the number instead. The menu and status lines
+are colored on a terminal; piped output stays plain.
+
 After each task it goes back to the menu (`0` goes back or
 exits). Create works from one file, or from one folder whose
-files all become a single gist. Delete fetches the freshest list
-from GitHub first, you pick a gist by number, and it asks once
-more (No is the default) before deleting it from GitHub and
-removing its local folder. About Me shows the social links.
-Change gists folder asks for the new folder and saves it; the
-files in the old folder stay where they are.
+files all become a single gist — the folder keeps the file's or
+folder's name, no name is asked. Delete fetches the freshest list
+from GitHub first, 10 gists per page (n = next page, p = previous
+page), showing only the name; you pick a gist by number, and it
+asks once more (No is the default) before deleting it from
+GitHub and removing its local folder. About Me shows the social
+links. Change gists folder asks for the new folder and saves it;
+the files in the old folder stay where they are.
+
+Lists are paged 10 per page, in `list` and in Delete, so a long
+list never scrolls off the screen. When there is no terminal,
+a list is printed all at once.
 
 The old commands still work, when you want one specific thing:
 

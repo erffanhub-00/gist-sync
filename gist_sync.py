@@ -5,7 +5,9 @@ Usage (run from the VS Code integrated terminal):
     python3 gist_sync.py
         No command: menu mode. Only the essential tasks (Auto sync,
         Create, Delete, About Me, Change gists folder), with Back
-        (0) everywhere.
+        (0) everywhere. On a terminal you move with the up/down
+        arrow keys and confirm with Enter; otherwise type the
+        number.
     python3 gist_sync.py auto
         Auto mode: detects what changed, what is new, what was
         deleted, and what is missing locally, shows one short
@@ -26,10 +28,15 @@ Rules:
     `--base-dir` only overrides it for a single run.
   - File names are NEVER renamed. Files inside a gist keep exactly
     the name they have on GitHub, or the name you gave the file
-    when you created the gist. When a folder is created (clone or
-    create), the program asks for its name and shows its own
+    when you created the gist. When a gist is cloned from GitHub,
+    the program asks for its folder name and shows its own
     suggestion as the default: press Enter to accept it, or type
-    a name you like better.
+    a name you like better. When a gist is created from a file or
+    folder you already have, no name is asked: the folder keeps
+    the file's or folder's name.
+  - All output is in English, so it renders correctly in the terminal.
+    The menu and status lines use colors when the output is a
+    terminal; piped output stays plain.
   - All output is in English, so it renders correctly in the terminal.
   - No token is stored in this file. It uses your `gh` login.
   - Standard library only. No pip install needed.
@@ -48,7 +55,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
@@ -62,24 +69,35 @@ CONFIG_PATH = Path.home() / ".config" / "gist-sync" / "config.json"
 # updated when a gist is added.
 
 
+def paint(text, code):
+    """Color text with an ANSI code, only when stdout is a terminal.
+
+    Piped or redirected output stays plain, so scripts and logs
+    are clean.
+    """
+    if sys.stdout.isatty():
+        return f"\033[{code}m{text}\033[0m"
+    return text
+
+
 def info(message):
-    print(f"[INFO] {message}")
+    print(f"[{paint('INFO', '36')}] {message}")
 
 
 def ok(message):
-    print(f"[OK] {message}")
+    print(f"[{paint('OK', '32')}] {message}")
 
 
 def skip(message):
-    print(f"[SKIP] {message}")
+    print(f"[{paint('SKIP', '33')}] {message}")
 
 
 def fail(message):
-    print(f"[FAIL] {message}")
+    print(f"[{paint('FAIL', '31')}] {message}")
 
 
 def error(message):
-    print(f"[ERROR] {message}", file=sys.stderr)
+    print(f"[{paint('ERROR', '31')}] {message}", file=sys.stderr)
 
 
 def expand_folder(text):
@@ -157,7 +175,7 @@ def prompt_for_folder():
     return expand_folder(answer)
 
 
-def resolve_base_dir(args, prompt=True):
+def resolve_base_dir(args):
     """Work out which folder to use, in this order.
 
     1. --base-dir on this run (does not change the saved choice).
@@ -178,8 +196,6 @@ def resolve_base_dir(args, prompt=True):
         if not validate_folder(base):
             return None
         return base
-    if not prompt:
-        return DEFAULT_BASE
     base = prompt_for_folder()
     if base is None:
         return None
@@ -401,6 +417,69 @@ def local_gist_map(base):
     return mapping
 
 
+PAGE_SIZE = 10
+
+
+def pick_from_list(items, format_item, title, allow_pick):
+    """Show items 10 per page, let the user move between pages.
+
+    Numbering runs across all pages (1..N). Keys: n = next page,
+    p = previous page, 0 = back. When picking is allowed, typing
+    a number chooses that item and its index (0-based) is
+    returned; otherwise None is returned. When there is no
+    terminal, all items are printed at once and None is returned.
+    """
+    if not items:
+        return None
+    if not sys.stdin.isatty():
+        for index, item in enumerate(items, start=1):
+            print(f"  {index}. {format_item(item)}")
+        return None
+    pages = (len(items) + PAGE_SIZE - 1) // PAGE_SIZE
+    page = 0
+    while True:
+        print(title)
+        start = page * PAGE_SIZE
+        for index, item in enumerate(items[start:start + PAGE_SIZE],
+                                     start=start + 1):
+            print(f"  {index}. {format_item(item)}")
+        keys = "[n] next, [p] previous" if pages > 1 else ""
+        if allow_pick:
+            keys += ", [number] choose" if keys else "[number] choose"
+            keys += ", [0] back"
+        else:
+            keys += ", [q] quit" if keys else "[q] quit"
+        print(f"Page {page + 1} of {pages} — {keys}")
+        try:
+            answer = input("> ").strip().lower()
+        except EOFError:
+            print()
+            return None
+        if answer in ("n", "next"):
+            if page < pages - 1:
+                page += 1
+            else:
+                error("Already on the last page.")
+            continue
+        if answer in ("p", "prev", "previous"):
+            if page > 0:
+                page -= 1
+            else:
+                error("Already on the first page.")
+            continue
+        if answer in ("q", "quit", "0"):
+            return None
+        if allow_pick and answer.isdigit():
+            number = int(answer)
+            if 1 <= number <= len(items):
+                return number - 1
+            error("That number is not on the list.")
+            continue
+        error("Type n for next, p for previous"
+              + (", a number to choose" if allow_pick else "")
+              + ", or 0 to go back.")
+
+
 def cmd_list(args):
     if not check_gh():
         return 1
@@ -410,10 +489,13 @@ def cmd_list(args):
     if not gists:
         info("No gists found.")
         return 0
-    print(f"Gists for {USERNAME} ({len(gists)}):")
-    for gist in gists:
-        desc = gist["description"] or "(no description)"
-        print(f"  {gist['id']}  {folder_name_for_gist(gist)}  {desc}")
+    pick_from_list(
+        gists,
+        lambda gist: f"{gist['id']}  {folder_name_for_gist(gist)}  "
+                    f"{gist['description'] or '(no description)'}",
+        title=f"Gists for {USERNAME} ({len(gists)}):",
+        allow_pick=False,
+    )
     return 0
 
 
@@ -644,19 +726,18 @@ def create_gist_and_clone(files, secret, desc, base, target_name=None,
                           source_folder=None):
     """Create a gist from files, then clone it into base.
 
-    The folder name is asked first, with the suggestion shown as
-    the default (Enter accepts it): the first file's name, or
-    target_name when given (the source folder's name). Files
-    inside the gist are never renamed, only the folder is.
+    The folder is named after the first file (stem), or
+    target_name when given (the source folder's name when the
+    files came from a folder). No name is asked here: the file
+    or folder already exists and already has a name. Asking for
+    a folder name only happens when cloning a gist from GitHub.
     Returns 0 on success.
 
     When the files came from a folder inside base (source_folder),
     that folder is moved aside while cloning, then removed: the
-    cloned folder keeps the chosen name, with the same files
-    inside. If cloning fails, the source folder is moved back.
+    cloned folder keeps the source folder's name, with the same
+    files inside. If cloning fails, the source folder is moved back.
     """
-    suggestion = target_name or Path(files[0]).stem or ""
-    folder = ask_folder_name(suggestion) if suggestion else ""
     cmd = ["gh", "gist", "create"]
     cmd.extend(str(f) for f in files)
     # gh has NO --secret flag: secret is its default.
@@ -674,8 +755,7 @@ def create_gist_and_clone(files, secret, desc, base, target_name=None,
     if not gist_id:
         info("Run: python3 gist_sync.py clone  to fetch it locally.")
         return 0
-    if not folder:
-        folder = gist_id
+    folder = target_name or Path(files[0]).stem or gist_id
     target = base / folder
     moved_aside = None
     if target.is_dir():
@@ -704,9 +784,6 @@ def create_gist_and_clone(files, secret, desc, base, target_name=None,
         return 1
     if moved_aside is not None:
         shutil.rmtree(moved_aside, ignore_errors=True)
-    elif source_folder is not None and source_folder.is_dir():
-        # The folder was renamed: its files now live in the clone.
-        shutil.rmtree(source_folder, ignore_errors=True)
     ok(f"Cloned locally to: {target}")
     return 0
 
@@ -905,18 +982,15 @@ def menu_create(args, base):
     Persian + English pair stays together like git-cheatsheet.
     0 goes back to the menu.
     """
-    print("Create a new gist")
-    print("  1. From one file")
-    print("  2. From a folder (all files become one gist)")
-    print("  0. Back")
-    try:
-        choice = input("Choose [0-2]: ").strip()
-    except EOFError:
-        return
-    if choice == "0" or not choice:
-        return
-    if choice not in ("1", "2"):
-        error("Choose 0, 1 or 2.")
+    choice = choose_option(
+        [
+            ("1", "From one file"),
+            ("2", "From a folder (all files become one gist)"),
+            ("0", "Back"),
+        ],
+        "Create a new gist",
+    )
+    if choice is None or choice == "0":
         return
     if choice == "1":
         try:
@@ -971,8 +1045,10 @@ def menu_delete(args, base):
     """Delete a gist, picked from the FRESHEST list from GitHub.
 
     The list is fetched from GitHub right now, never from a saved
-    or local list, so it is always up to date. 0 goes back to the
-    menu. Deleting asks once more, with No as the default.
+    or local list, so it is always up to date. It shows 10 gists
+    per page (n = next page, p = previous page, 0 = back) and
+    only the name, no description. Deleting asks once more,
+    with No as the default.
     """
     gists = fetch_gists()
     if gists is None:
@@ -980,27 +1056,15 @@ def menu_delete(args, base):
     if not gists:
         info("No gists found on GitHub.")
         return
-    print("Delete a gist (fresh list from GitHub):")
-    for index, gist in enumerate(gists, start=1):
-        name = folder_name_for_gist(gist)
-        desc = gist["description"] or "(no description)"
-        print(f"  {index}. {name}  {desc}")
-    print("  0. Back")
-    try:
-        choice = input("Choose a gist to delete [0 Back]: ").strip()
-    except EOFError:
+    chosen = pick_from_list(
+        gists,
+        lambda gist: folder_name_for_gist(gist),
+        title="Delete a gist (fresh list from GitHub):",
+        allow_pick=True,
+    )
+    if chosen is None:
         return
-    if choice == "0" or not choice:
-        return
-    try:
-        number = int(choice)
-    except ValueError:
-        error("Choose a number from the list.")
-        return
-    if not 1 <= number <= len(gists):
-        error("That number is not on the list.")
-        return
-    gist = gists[number - 1]
+    gist = gists[chosen]
     name = folder_name_for_gist(gist)
     print(f"  {name}")
     print(f"  https://gist.github.com/{USERNAME}/{gist['id']}")
@@ -1023,6 +1087,90 @@ def menu_delete(args, base):
                 ok(f"Removed the local folder: {folder.name}")
 
 
+def _read_key(fd):
+    """Read one keypress from a terminal: 'up', 'down', 'enter',
+    'esc', 'q', or the character itself.
+
+    Unix only (termios). The terminal is put in raw mode for the
+    one keypress and restored right away.
+    """
+    import select
+    import termios
+    import tty
+
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = os.read(fd, 1).decode("utf-8", "ignore")
+        if ch == "\x1b":
+            # An arrow key sends ESC [ A / ESC [ B. Wait briefly
+            # for the rest; a lone ESC means the user pressed ESC.
+            ready, _, _ = select.select([fd], [], [], 0.15)
+            if not ready:
+                return "esc"
+            seq = os.read(fd, 2).decode("utf-8", "ignore")
+            if seq == "[A":
+                return "up"
+            if seq == "[B":
+                return "down"
+            return "other"
+        if ch in ("\r", "\n"):
+            return "enter"
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def choose_option(options, title):
+    """Pick one option from a menu. Returns its key, or None.
+
+    options is a list of (key, label). On a real terminal the
+    user moves with the up/down arrow keys and confirms with
+    Enter (q or ESC quits); the chosen line is highlighted.
+    When arrow keys are not available (no terminal, or termios
+    missing), it falls back to typing the number.
+    """
+    keys = [key for key, _label in options]
+    try:
+        fd = sys.stdin.fileno()
+        if not sys.stdin.isatty():
+            raise OSError("not a terminal")
+        selected = 0
+        while True:
+            # Clear the screen and redraw the menu.
+            print("\033[2J\033[H", end="")
+            print(paint(f"  {title}", "1;36"))
+            for index, (_key, label) in enumerate(options):
+                if index == selected:
+                    print(paint(f"  > {label} ", "1;7"))
+                else:
+                    print(f"    {label}")
+            print(paint("  ↑ ↓ to move, Enter to choose, q to quit", "33"))
+            key = _read_key(fd)
+            if key == "up":
+                selected = (selected - 1) % len(options)
+            elif key == "down":
+                selected = (selected + 1) % len(options)
+            elif key == "enter":
+                return keys[selected]
+            elif key in ("q", "esc"):
+                return None
+    except Exception:
+        # No arrow keys here: type the number instead.
+        print(f"  {title}")
+        for key, label in options:
+            print(f"  {key}. {label}")
+        try:
+            answer = input("Choose: ").strip()
+        except EOFError:
+            return None
+        if answer in keys:
+            return answer
+        return None
+
+
 def cmd_menu(args):
     """Menu mode: only the essential tasks, with Back (0) everywhere.
 
@@ -1040,20 +1188,17 @@ def cmd_menu(args):
     if base is None:
         return 1
     info(f"Using folder: {base}")
+    options = [
+        ("1", "Auto sync"),
+        ("2", "Create new gist"),
+        ("3", "Delete a gist"),
+        ("4", "About Me"),
+        ("5", "Change gists folder"),
+        ("0", "Exit"),
+    ]
     while True:
-        print(f"=== gist-sync {__version__} ===")
-        print("  1. Auto sync")
-        print("  2. Create new gist")
-        print("  3. Delete a gist")
-        print("  4. About Me")
-        print("  5. Change gists folder")
-        print("  0. Exit")
-        try:
-            choice = input("Choose [0-5]: ").strip()
-        except EOFError:
-            print()
-            return 0
-        if choice == "0":
+        choice = choose_option(options, f"=== gist-sync {__version__} ===")
+        if choice is None or choice == "0":
             return 0
         if choice == "1":
             cmd_auto(args)
@@ -1072,9 +1217,6 @@ def cmd_menu(args):
             if new_base is not None:
                 base = new_base
                 info(f"Using folder: {base}")
-        else:
-            error("Choose 0, 1, 2, 3, 4 or 5.")
-            continue
         wait_for_enter()
 
 
