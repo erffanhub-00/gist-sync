@@ -2,10 +2,11 @@
 
 Manage all your GitHub Gists from one folder, with clean error handling.
 
-One folder (`~/gists`) plus one Python program (`gist_sync.py`). Edit a gist
-file in VS Code, run one command, and it is pushed to GitHub. File names
-are never renamed: files inside a gist keep exactly the name they have
-on GitHub, or the name you gave the file when you created the gist.
+You choose one folder, once. All your gists live in that folder, one
+subfolder per gist. Edit a gist file in VS Code, run one command, and
+it is pushed to GitHub. File names are never renamed: files inside a
+gist keep exactly the name they have on GitHub, or the name you gave
+the file when you created the gist.
 
 ## Requirements
 
@@ -21,19 +22,41 @@ No pip packages needed. Standard library only. No token is stored in
 this program; it uses your `gh` login. All terminal output is in
 English.
 
+## Setup: choose your folder
+
+```bash
+# Ask once, save the choice, and use it from then on
+python3 gist_sync.py setup
+
+# Or give the folder directly
+python3 gist_sync.py setup ~/my-gists
+```
+
+The choice is saved in `~/.config/gist-sync/config.json` (only the
+folder path, nothing secret). The default is `~/gists` — just press
+Enter to accept it. Run `setup` again any time to change the folder.
+Files in the old folder stay where they are; the program never moves
+them by itself.
+
+For a single run only, without changing the saved choice:
+
+```bash
+python3 gist_sync.py --base-dir ~/other-folder sync
+```
+
 ## Usage
 
 ```bash
 # See all your gists on GitHub
 python3 gist_sync.py list
 
-# Clone all your gists into ~/gists (friendly folder names, files unchanged)
+# Clone all your gists into your chosen folder (friendly folder names, files unchanged)
 python3 gist_sync.py clone
 
 # Show which local gists have unpushed changes
 python3 gist_sync.py status
 
-# Commit and push every changed gist in ~/gists
+# Commit and push every changed gist in your chosen folder
 python3 gist_sync.py sync
 
 # Create a new gist from a file (public by default)
@@ -43,13 +66,13 @@ python3 gist_sync.py create my-file.md --desc "My gist"
 python3 gist_sync.py create my-file.md --desc "My gist" --secret
 ```
 
-A new gist is cloned into `~/gists` automatically after creation, in a
-folder named after the file you gave it, so you can manage it like the
-others from then on.
+A new gist is cloned into your chosen folder automatically after
+creation, in a folder named after the file you gave it, so you can
+manage it like the others from then on.
 
 ## How sync works
 
-For each folder in `~/gists` that is a git repo:
+For each folder in your chosen folder that is a git repo:
 
 1. If nothing changed, it is skipped.
 2. If files changed, they are committed as `auto update: YYYY-MM-DD HH:MM`.

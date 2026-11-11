@@ -2,6 +2,7 @@
 """Manage GitHub Gists from one folder, with clean error handling.
 
 Usage (run from the VS Code integrated terminal):
+    python3 gist_sync.py setup
     python3 gist_sync.py list
     python3 gist_sync.py clone
     python3 gist_sync.py status
@@ -9,7 +10,10 @@ Usage (run from the VS Code integrated terminal):
     python3 gist_sync.py create my-file.md --desc "My gist" [--secret]
 
 Rules:
-  - One folder: ~/gists (or --base-dir). Each gist is one subfolder.
+  - You choose ONE folder, once, with `setup`. All your gists live
+    in that folder, one subfolder per gist. The choice is saved in
+    ~/.config/gist-sync/config.json, so you never type the path again.
+    `--base-dir` only overrides it for a single run.
   - File names are NEVER renamed. Files inside a gist keep exactly
     the name they have on GitHub, or the name you gave the file
     when you created the gist. Only the *folder* name is friendly
@@ -24,15 +28,18 @@ via `sudo pacman -S github-cli git`, plus `gh auth login`.
 
 import argparse
 import json
-import re
+import os
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
+__version__ = "1.1.0"
+
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
+CONFIG_PATH = Path.home() / ".config" / "gist-sync" / "config.json"
 
 # Friendly folder names for the 6 current gists.
 # Files inside each folder are NOT renamed, only the folder is.
@@ -64,6 +71,138 @@ def fail(message):
 
 def error(message):
     print(f"[ERROR] {message}", file=sys.stderr)
+
+
+def expand_folder(text):
+    """Expand ~ and environment variables, return an absolute Path.
+
+    Accepts a string or a Path (argparse gives us Paths).
+    """
+    return Path(os.path.expandvars(str(text).strip())).expanduser().resolve()
+
+
+def load_config():
+    """Saved choice from ~/.config/gist-sync/config.json, or {}.
+
+    A missing file means no choice yet. A broken file is reported
+    cleanly and treated as no choice, never a crash.
+    """
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError):
+        error(f"Could not read saved settings in {CONFIG_PATH}. Ignoring it.")
+        error("Run: python3 gist_sync.py setup  to choose the folder again.")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def save_config(base):
+    """Save the chosen folder. Returns True on success."""
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(
+            json.dumps({"base_dir": str(base)}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        error(f"Could not save settings to {CONFIG_PATH}: {exc}")
+        return False
+    return True
+
+
+def validate_folder(base):
+    """Return True when base can be used as the gists folder."""
+    if base.exists() and not base.is_dir():
+        error(f"That path is a file, not a folder: {base}")
+        return False
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        error(f"Could not create folder {base}: {exc}")
+        return False
+    return True
+
+
+def prompt_for_folder():
+    """Ask the user to choose the gists folder. Returns a Path or None.
+
+    Pressing Enter accepts the default ~/gists. When there is no
+    terminal to ask in (for example a script), the default is used
+    without asking, so the program never hangs waiting for input.
+    """
+    if not sys.stdin.isatty():
+        return DEFAULT_BASE
+    print(f"Your gists will live in one folder. Each gist is one subfolder.")
+    try:
+        answer = input(
+            f"Which folder should hold all your gists? [{DEFAULT_BASE}] "
+        ).strip()
+    except EOFError:
+        return DEFAULT_BASE
+    if not answer:
+        return DEFAULT_BASE
+    return expand_folder(answer)
+
+
+def resolve_base_dir(args, prompt=True):
+    """Work out which folder to use, in this order.
+
+    1. --base-dir on this run (does not change the saved choice).
+    2. The saved choice from setup.
+    3. Ask once with setup's prompt and save the answer
+       (or the default ~/gists when there is no terminal).
+    Returns a Path, or None when no folder could be chosen.
+    """
+    if getattr(args, "base_dir", None) is not None:
+        base = expand_folder(args.base_dir)
+        if not validate_folder(base):
+            return None
+        return base
+    had_config_file = CONFIG_PATH.exists()
+    saved = load_config().get("base_dir")
+    if saved:
+        base = expand_folder(saved)
+        if not validate_folder(base):
+            return None
+        return base
+    if not prompt:
+        return DEFAULT_BASE
+    base = prompt_for_folder()
+    if base is None:
+        return None
+    if not validate_folder(base):
+        return None
+    # Only save a fresh choice. A broken config file is left alone
+    # so setup can fix it, instead of silently overwriting it.
+    if not had_config_file and save_config(base):
+        info(f"Saved your gists folder: {base}")
+    return base
+
+
+def cmd_setup(args):
+    """Choose (or change) the folder that holds all your gists."""
+    saved = load_config().get("base_dir")
+    if saved:
+        info(f"Current gists folder: {saved}")
+    if getattr(args, "folder", None) is not None:
+        base = expand_folder(args.folder)
+    elif getattr(args, "base_dir", None) is not None:
+        base = expand_folder(args.base_dir)
+    else:
+        base = prompt_for_folder()
+        if base is None:
+            return 1
+    if not validate_folder(base):
+        return 1
+    if not save_config(base):
+        return 1
+    ok(f"Gists folder set to: {base}")
+    info("All your gists will live in that folder.")
+    return 0
 
 
 def last_line(text, limit=200):
@@ -215,7 +354,10 @@ def cmd_clone(args):
     gists = fetch_gists()
     if gists is None:
         return 1
-    base = args.base_dir
+    base = resolve_base_dir(args)
+    if base is None:
+        return 1
+    info(f"Using folder: {base}")
     base.mkdir(parents=True, exist_ok=True)
     cloned = skipped = failed = 0
     for gist in gists:
@@ -243,7 +385,10 @@ def cmd_clone(args):
 def cmd_status(args):
     if not check_git():
         return 1
-    base = args.base_dir
+    base = resolve_base_dir(args)
+    if base is None:
+        return 1
+    info(f"Using folder: {base}")
     gists = local_gists(base)
     if not gists:
         info(f"No local gists found in {base}.")
@@ -315,7 +460,10 @@ def sync_one(path):
 def cmd_sync(args):
     if not check_git():
         return 1
-    base = args.base_dir
+    base = resolve_base_dir(args)
+    if base is None:
+        return 1
+    info(f"Using folder: {base}")
     gists = local_gists(base)
     if not gists:
         info(f"No local gists found in {base}.")
@@ -358,7 +506,10 @@ def cmd_create(args):
         return 0
     # Clone it locally so it can be managed like the others.
     # Folder name comes from the first file you gave, not renamed.
-    base = args.base_dir
+    base = resolve_base_dir(args)
+    if base is None:
+        return 1
+    info(f"Using folder: {base}")
     base.mkdir(parents=True, exist_ok=True)
     folder = Path(args.files[0]).stem or gist_id
     target = base / folder
@@ -379,38 +530,78 @@ def cmd_create(args):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="gist_sync.py",
-        description="Manage your GitHub Gists from one folder (~/gists).",
+        description="Manage your GitHub Gists from one folder you choose.",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     parser.add_argument(
         "--base-dir",
         type=Path,
-        default=DEFAULT_BASE,
-        help="Folder holding all gist folders (default: ~/gists).",
+        default=None,
+        help="Folder holding all gist folders, for this run only. "
+        "Without it, the folder saved by 'setup' is used.",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
         help="Show the full error traceback on unexpected errors.",
     )
+    # --base-dir also works after the command (for example
+    # `sync --base-dir ~/other`), so define it on every subcommand too.
+    # SUPPRESS means it only overwrites the top-level value when given.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--base-dir",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="Folder holding all gist folders, for this run only.",
+    )
     sub = parser.add_subparsers(dest="command", metavar="command")
 
-    p_list = sub.add_parser("list", help="List all your gists on GitHub.")
+    p_setup = sub.add_parser(
+        "setup",
+        parents=[common],
+        help="Choose the folder that holds all your gists (asked once, saved).",
+    )
+    p_setup.add_argument(
+        "folder",
+        nargs="?",
+        type=Path,
+        default=None,
+        help="Folder to use. If omitted, you will be asked.",
+    )
+    p_setup.set_defaults(func=cmd_setup)
+
+    p_list = sub.add_parser(
+        "list", parents=[common], help="List all your gists on GitHub."
+    )
     p_list.set_defaults(func=cmd_list)
 
-    p_clone = sub.add_parser("clone", help="Clone all your gists into ~/gists.")
+    p_clone = sub.add_parser(
+        "clone",
+        parents=[common],
+        help="Clone all your gists into your chosen folder.",
+    )
     p_clone.set_defaults(func=cmd_clone)
 
     p_status = sub.add_parser(
-        "status", help="Show which local gists have unpushed changes."
+        "status",
+        parents=[common],
+        help="Show which local gists have unpushed changes.",
     )
     p_status.set_defaults(func=cmd_status)
 
     p_sync = sub.add_parser(
-        "sync", help="Commit and push every changed gist in ~/gists."
+        "sync",
+        parents=[common],
+        help="Commit and push every changed gist in your chosen folder.",
     )
     p_sync.set_defaults(func=cmd_sync)
 
-    p_create = sub.add_parser("create", help="Create a new gist from file(s).")
+    p_create = sub.add_parser(
+        "create", parents=[common], help="Create a new gist from file(s)."
+    )
     p_create.add_argument("files", nargs="+", help="File(s) to put in the gist.")
     p_create.add_argument("--desc", default="", help="Description for the gist.")
     p_create.add_argument(
