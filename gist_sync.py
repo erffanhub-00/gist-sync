@@ -35,21 +35,25 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
 CONFIG_PATH = Path.home() / ".config" / "gist-sync" / "config.json"
 
-# Friendly folder names for the 6 current gists.
+# Friendly folder names for the 7 current gists.
+# Keys are the FULL 32-character gist ids GitHub returns.
+# (v1.1.0 used short 8-character ids for Hermes and Tree, which is
+# why those two cloned under their full ids instead. Fixed in v1.1.1.)
 # Files inside each folder are NOT renamed, only the folder is.
 FRIENDLY_FOLDERS = {
-    "91ca6cf9": "hermes",
-    "d8f29163": "tree-prompt",
+    "91ca6cf9de61fbd124926103387507f8": "hermes",
+    "d8f291636141e097d66f2a93a3982cbe": "tree-prompt",
     "25a903f2ee822b97c9132ef0e80186f1": "git-cheatsheet",
     "7fcbf8721443ea30143bc76d40c21747": "linux-cheatsheet",
     "708d3c1617d9d044873536179f878c36": "powershell-cheatsheet",
     "2c1ba425a3ca0b937937368e94b9cb46": "docker-cheatsheet",
+    "b9defe688de21764d08e613a68953836": "omarchy-guide",
 }
 
 
@@ -319,8 +323,20 @@ def fetch_gists():
 
 
 def folder_name_for(gist_id):
-    """Friendly folder name for a known gist, else the gist id itself."""
-    return FRIENDLY_FOLDERS.get(gist_id, gist_id)
+    """Friendly folder name for a known gist, else the gist id itself.
+
+    Exact match first. As a fallback, a short id also matches when
+    it is a prefix of a known full id (at least 8 characters), and
+    vice versa, so old short ids keep working too.
+    """
+    if gist_id in FRIENDLY_FOLDERS:
+        return FRIENDLY_FOLDERS[gist_id]
+    for known_id, name in FRIENDLY_FOLDERS.items():
+        if len(gist_id) >= 8 and known_id.startswith(gist_id):
+            return name
+        if len(known_id) >= 8 and gist_id.startswith(known_id):
+            return name
+    return gist_id
 
 
 def local_gists(base):
