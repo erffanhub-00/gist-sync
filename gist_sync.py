@@ -55,7 +55,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
@@ -250,20 +250,41 @@ def last_line(text, limit=200):
     return lines[0][:limit]
 
 
-def unpushed_count(path):
-    """Number of local commits not yet pushed, or None if unknown.
-
-    Returns 0 when up to date, >0 when commits are waiting to be pushed,
-    and None when there is no upstream to compare with (for example a
-    repo with no remote yet). None is treated as "needs a push attempt".
+def _flush_stdin():
+    """Discard any unread input (stray Enter presses, half-read
+    escape sequences). Unix only; silently does nothing when
+    stdin is not a terminal.
     """
-    code, out, _err = run(["git", "rev-list", "--count", "@{u}..HEAD"], cwd=path)
-    if code != 0:
-        return None
     try:
-        return int(out.strip())
+        import termios
+        if sys.stdin.isatty():
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
+def sync_counts(path):
+    """Return (ahead, behind) vs the upstream, or (None, None).
+
+    ahead = local commits not pushed yet; behind = commits on
+    GitHub not pulled yet. Runs `git fetch` first, so the
+    comparison uses the latest state from GitHub. (None, None)
+    means there is no upstream to compare with (for example a
+    repo with no remote yet). A failed fetch (offline?) is not
+    fatal: the last fetched state is used instead.
+    """
+    run(["git", "fetch", "--quiet"], cwd=path)
+    code, out, _err = run(
+        ["git", "rev-list", "--left-right", "--count", "HEAD...@{u}"],
+        cwd=path,
+    )
+    if code != 0:
+        return None, None
+    try:
+        ahead, behind = (int(n) for n in out.split())
+        return ahead, behind
     except ValueError:
-        return None
+        return None, None
 
 
 def run(cmd, cwd=None, timeout=120):
@@ -558,8 +579,8 @@ def cmd_status(args):
             fail(f"{path.name}: could not check status. {last_line(err)}")
             continue
         changed = [line for line in out.splitlines() if line.strip()]
-        ahead = unpushed_count(path)
-        if not changed and (ahead == 0):
+        ahead, behind = sync_counts(path)
+        if not changed and (ahead or 0) == 0 and (behind or 0) == 0:
             print(f"[CLEAN] {path.name}")
         else:
             if changed:
@@ -573,23 +594,45 @@ def cmd_status(args):
                 print(f"[UNPUSHED] {path.name}: has commits, no upstream to compare")
             elif ahead > 0:
                 print(f"[UNPUSHED] {path.name}: {ahead} commit(s) not pushed yet")
+            if (behind or 0) > 0:
+                print(f"[BEHIND] {path.name}: {behind} commit(s) on GitHub, "
+                      f"run sync to pull them")
     return 0
 
 
 def sync_one(path):
     """Sync one gist folder. Returns 'ok', 'skip' or 'fail'.
 
-    A failed push must not lose the change: if the commit succeeded
-    but the push failed, the next run still sees the commit as
-    unpushed (via unpushed_count) and retries the push.
+    - Edits made on the GitHub website are pulled first
+      (fast-forward only, when the local tree is clean and
+      nothing local waits to be pushed).
+    - Local changes are committed as "auto update: ..." and pushed.
+    - A failed push must not lose the change: if the commit
+      succeeded but the push failed, the next run still sees the
+      commit as unpushed and retries the push.
+    - Changed on both sides at once is not guessed at: it fails
+      with a clear message and is left for the user to resolve.
     """
     name = path.name
     code, out, err = run(["git", "status", "--porcelain"], cwd=path)
     if code != 0:
         fail(f"{name}: could not check status. {last_line(err)}")
         return "fail"
+    changed = [line for line in out.splitlines() if line.strip()]
+    ahead, behind = sync_counts(path)
+    if (behind or 0) > 0:
+        if changed or (ahead or 0) > 0:
+            fail(f"{name}: changed both here and on GitHub. "
+                 f"Resolve it first, then run again.")
+            return "fail"
+        code, _out, err = run(["git", "pull", "--ff-only"], cwd=path)
+        if code != 0:
+            fail(f"{name}: could not pull updates from GitHub. {last_line(err)}")
+            return "fail"
+        ok(f"{name}: pulled {behind} update(s) from GitHub")
+        return "ok"
     committed = False
-    if out.strip():
+    if changed:
         code, _out, err = run(["git", "add", "-A"], cwd=path)
         if code != 0:
             fail(f"{name}: git add failed. {last_line(err)}")
@@ -603,7 +646,6 @@ def sync_one(path):
                 fail(f"{name}: git commit failed. {last_line(err)}")
                 return "fail"
             committed = True
-    ahead = unpushed_count(path)
     if not committed and ahead == 0:
         skip(f"{name}: no changes")
         return "skip"
@@ -854,8 +896,11 @@ def cmd_auto(args):
     present = local_gist_map(base)
     missing = [gist for gist in gists if gist["id"] not in present]
 
-    # What changed locally? (changed, added or deleted files,
-    # or commits that were never pushed)
+    # What changed locally? Only real changes are listed: the
+    # file names that actually changed, commits waiting to be
+    # pushed, and updates waiting to be pulled from GitHub.
+    # Each entry says exactly which one it is, so "0 file(s)
+    # changed" never shows up.
     changed = []
     for path in local_gists(base):
         code, out, err = run(["git", "status", "--porcelain"], cwd=path)
@@ -863,9 +908,12 @@ def cmd_auto(args):
             fail(f"{path.name}: could not check status. {last_line(err)}")
             continue
         lines = [line for line in out.splitlines() if line.strip()]
-        ahead = unpushed_count(path)
-        if lines or (ahead is None) or (ahead or 0) > 0:
-            changed.append((path, len(lines)))
+        ahead, behind = sync_counts(path)
+        if lines or (ahead is None) or (ahead or 0) > 0 or (behind or 0) > 0:
+            changed.append(
+                {"path": path, "lines": lines,
+                 "ahead": ahead, "behind": behind}
+            )
 
     loose = loose_files(base)
     folders = loose_folders(base)
@@ -877,13 +925,46 @@ def cmd_auto(args):
     print("Found:")
     for gist in missing:
         print(f"  {folder_name_for_gist(gist)}: missing locally, will be cloned")
-    for path, count in changed:
-        print(f"  {path.name}: {count} file(s) changed")
+    for item in changed:
+        parts = []
+        if item["lines"]:
+            names = [line[3:].strip() for line in item["lines"]]
+            shown = ", ".join(names[:5])
+            if len(names) > 5:
+                shown += f", ... and {len(names) - 5} more"
+            parts.append(f"{len(names)} file(s) changed: {shown}")
+        if (item["ahead"] or 0) > 0:
+            parts.append(f"{item['ahead']} commit(s) not pushed yet")
+        if item["ahead"] is None:
+            parts.append("no upstream to compare")
+        if (item["behind"] or 0) > 0:
+            parts.append(f"{item['behind']} update(s) to pull from GitHub")
+        print(f"  {item['path'].name}: {'; '.join(parts)}")
     for path in loose:
         print(f"  {path.name}: new file, not in any gist yet")
     for path, files in folders:
         print(f"  {path.name}/: new folder with {len(files)} file(s), "
               f"not a gist yet")
+
+    if changed and ask_yes_no("Show what changed?", default=False):
+        for item in changed:
+            path = item["path"]
+            print(f"--- {path.name} ---")
+            for line in item["lines"][:10]:
+                print(f"    {line.strip()}")
+            if len(item["lines"]) > 10:
+                print(f"    ... and {len(item['lines']) - 10} more")
+            code, out, _err = run(["git", "diff", "--stat"], cwd=path)
+            if code == 0 and out.strip():
+                print(out.rstrip())
+            if (item["behind"] or 0) > 0:
+                code, out, _err = run(
+                    ["git", "log", "--oneline", "HEAD..@{u}"], cwd=path
+                )
+                if code == 0 and out.strip():
+                    print("  New on GitHub:")
+                    for line in out.splitlines():
+                        print(f"    {line.strip()}")
 
     if not ask_yes_no("Sync now?", default=True):
         info("Nothing changed on GitHub.")
@@ -901,8 +982,8 @@ def cmd_auto(args):
             failed += 1
         else:
             ok(f"{target.name}: cloned")
-    for path, _count in changed:
-        if sync_one(path) == "fail":
+    for item in changed:
+        if sync_one(item["path"]) == "fail":
             failed += 1
     for path in loose:
         if not ask_yes_no(f"Create a new gist from {path.name}?", default=True):
@@ -938,9 +1019,14 @@ def cmd_auto(args):
 
 
 def wait_for_enter():
-    """Pause so the user can read the output, then go back to the menu."""
+    """Pause so the user can read the output, then go back to the menu.
+
+    Any stray Enter presses left over from the menu are discarded
+    first, so this really waits for a fresh Enter.
+    """
     if not sys.stdin.isatty():
         return
+    _flush_stdin()
     try:
         input("Press Enter to go back to the menu. ")
     except EOFError:
@@ -1092,7 +1178,12 @@ def _read_key(fd):
     'esc', 'q', or the character itself.
 
     Unix only (termios). The terminal is put in raw mode for the
-    one keypress and restored right away.
+    one keypress and restored right away. Arrow keys come in two
+    forms and both are handled: ESC [ A / ESC [ B (normal mode)
+    and ESC O A / ESC O B (application cursor mode). Any input
+    left unread afterwards (for example a trailing newline when
+    Enter arrives as CR LF) is discarded, so it cannot leak into
+    the next prompt.
     """
     import select
     import termios
@@ -1103,15 +1194,15 @@ def _read_key(fd):
         tty.setraw(fd)
         ch = os.read(fd, 1).decode("utf-8", "ignore")
         if ch == "\x1b":
-            # An arrow key sends ESC [ A / ESC [ B. Wait briefly
-            # for the rest; a lone ESC means the user pressed ESC.
+            # An arrow key sends ESC plus two more bytes. Wait
+            # briefly for the rest; a lone ESC means ESC was pressed.
             ready, _, _ = select.select([fd], [], [], 0.15)
             if not ready:
                 return "esc"
             seq = os.read(fd, 2).decode("utf-8", "ignore")
-            if seq == "[A":
+            if seq in ("[A", "OA"):
                 return "up"
-            if seq == "[B":
+            if seq in ("[B", "OB"):
                 return "down"
             return "other"
         if ch in ("\r", "\n"):
@@ -1121,6 +1212,10 @@ def _read_key(fd):
         return ch
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except Exception:
+            pass
 
 
 def choose_option(options, title):
@@ -1147,7 +1242,8 @@ def choose_option(options, title):
                     print(paint(f"  > {label} ", "1;7"))
                 else:
                     print(f"    {label}")
-            print(paint("  ↑ ↓ to move, Enter to choose, q to quit", "33"))
+            print(paint("  ↑ ↓ to move, Enter to choose, "
+                        "or type the number, q to quit", "33"))
             key = _read_key(fd)
             if key == "up":
                 selected = (selected - 1) % len(options)
@@ -1157,18 +1253,25 @@ def choose_option(options, title):
                 return keys[selected]
             elif key in ("q", "esc"):
                 return None
+            elif key in keys:
+                # Typing the number works too, like before.
+                return key
     except Exception:
-        # No arrow keys here: type the number instead.
-        print(f"  {title}")
-        for key, label in options:
-            print(f"  {key}. {label}")
-        try:
-            answer = input("Choose: ").strip()
-        except EOFError:
-            return None
-        if answer in keys:
-            return answer
-        return None
+        # No arrow keys here: type the number instead. A wrong
+        # key asks again instead of leaving the menu.
+        while True:
+            print(f"  {title}")
+            for key, label in options:
+                print(f"  {key}. {label}")
+            try:
+                answer = input("Choose: ").strip()
+            except EOFError:
+                return None
+            if answer in keys:
+                return answer
+            if not answer or answer == "q":
+                return None
+            error("Choose one of: " + ", ".join(keys) + ".")
 
 
 def cmd_menu(args):
