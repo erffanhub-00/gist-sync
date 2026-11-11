@@ -46,29 +46,10 @@ python3 gist_sync.py --base-dir ~/other-folder sync
 
 ## Usage
 
-Just run it with no command. It detects everything by itself:
+Just run it with no command. The menu opens:
 
 ```bash
 python3 gist_sync.py
-```
-
-It finds what changed, what is new, what was deleted, and which
-gists are missing locally, shows one short summary, asks once
-(`Sync now? [Y/n]` — Enter means yes), and does it all. A file
-sitting directly in your gists folder (not inside a subfolder) is
-offered as a new gist: it asks public (1) or secret (2), then
-creates it, clones it into its own folder, and removes the loose
-file, because it now lives inside its gist folder. If nothing
-changed, it just says `Everything is up to date.` and does
-nothing on GitHub.
-
-## Menu
-
-Auto mode and menu mode are separate and never mix. The menu is
-only there when you ask for it:
-
-```bash
-python3 gist_sync.py menu
 ```
 
 ```
@@ -80,6 +61,36 @@ python3 gist_sync.py menu
   5. Change gists folder
   0. Exit
 ```
+
+## Auto sync
+
+Auto sync is menu option 1, or directly:
+
+```bash
+python3 gist_sync.py auto
+```
+
+It finds what changed, what is new, what was deleted, and which
+gists are missing locally, shows one short summary, asks once
+(`Sync now? [Y/n]` — Enter means yes), and does it all. A file
+sitting directly in your gists folder (not inside a subfolder) is
+offered as a new gist: it asks public (1) or secret (2), then
+creates it, clones it into its own folder, and removes the loose
+file, because it now lives inside its gist folder. A folder
+sitting directly in your gists folder works the same way, as one
+multi-file gist. If nothing changed, it just says
+`Everything is up to date.` and does nothing on GitHub.
+
+A gist created on the GitHub website (not in the program's
+folder-name table) still clones into a readable folder: its name
+comes from the files inside it — one file gives its name, several
+files give their common name part.
+
+## Menu
+
+The menu is the default: running with no command opens it, and
+`python3 gist_sync.py menu` opens the same menu. Auto mode never
+runs by itself; it is only menu option 1 (or the `auto` command).
 
 After each task it goes back to the menu (`0` goes back or
 exits). Create works from one file, or from one folder whose

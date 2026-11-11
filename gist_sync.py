@@ -3,14 +3,15 @@
 
 Usage (run from the VS Code integrated terminal):
     python3 gist_sync.py
-        No command: auto mode. Detects what changed, what is new,
-        what was deleted, and what is missing locally, shows one
-        short summary, asks once, and does it all.
+        No command: menu mode. Only the essential tasks (Auto sync,
+        Create, Delete, About Me, Change gists folder), with Back
+        (0) everywhere.
+    python3 gist_sync.py auto
+        Auto mode: detects what changed, what is new, what was
+        deleted, and what is missing locally, shows one short
+        summary, asks once, and does it all. Also menu option 1.
     python3 gist_sync.py menu
-        Menu mode: only the essential tasks (Auto sync, Create,
-        Delete, About Me, Change gists folder), with Back (0)
-        everywhere. Auto mode and menu mode are separate and
-        never mix.
+        Same menu as running with no command.
     python3 gist_sync.py setup
     python3 gist_sync.py list
     python3 gist_sync.py clone
@@ -44,16 +45,19 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
 CONFIG_PATH = Path.home() / ".config" / "gist-sync" / "config.json"
 
-# Friendly folder names for the 7 current gists.
+# Friendly folder names for the 7 older gists.
 # Keys are the FULL 32-character gist ids GitHub returns.
 # (v1.1.0 used short 8-character ids for Hermes and Tree, which is
 # why those two cloned under their full ids instead. Fixed in v1.1.1.)
+# This table is ONLY for these older gists. A gist created later
+# does NOT need an entry here: when cloning, its folder name comes
+# from the files inside the gist (see folder_name_for_gist).
 # Files inside each folder are NOT renamed, only the folder is.
 FRIENDLY_FOLDERS = {
     "91ca6cf9de61fbd124926103387507f8": "hermes",
@@ -299,7 +303,12 @@ def check_git():
 
 
 def fetch_gists():
-    """Return a list of {'id': ..., 'description': ...}, or None on error."""
+    """Return a list of {'id', 'description', 'files'}, or None on error.
+
+    'files' is the list of file names inside the gist, as GitHub
+    reports them. It is used to name the local folder of a gist
+    that has no entry in FRIENDLY_FOLDERS.
+    """
     code, out, err = run(["gh", "api", f"users/{USERNAME}/gists?per_page=100"])
     if code != 0:
         # Fallback: gh gist list with JSON output.
@@ -325,8 +334,25 @@ def fetch_gists():
     for item in data:
         if not isinstance(item, dict) or "id" not in item:
             continue
+        raw_files = item.get("files")
+        if isinstance(raw_files, dict):
+            # gh api: files is an object keyed by file name.
+            names = sorted(raw_files.keys())
+        elif isinstance(raw_files, list):
+            # gh gist list: files is a list of objects.
+            names = sorted(
+                str(entry.get("filename", ""))
+                for entry in raw_files
+                if isinstance(entry, dict) and entry.get("filename")
+            )
+        else:
+            names = []
         gists.append(
-            {"id": str(item["id"]), "description": str(item.get("description") or "")}
+            {
+                "id": str(item["id"]),
+                "description": str(item.get("description") or ""),
+                "files": names,
+            }
         )
     return gists
 
@@ -346,6 +372,32 @@ def folder_name_for(gist_id):
         if len(known_id) >= 8 and gist_id.startswith(known_id):
             return name
     return gist_id
+
+
+def folder_name_for_gist(gist):
+    """Friendly folder name for a gist dict from fetch_gists.
+
+    1. The FRIENDLY_FOLDERS table (the 7 older gists).
+    2. Otherwise the files inside the gist: one file -> its name
+       without the extension (my-guide.md -> my-guide); several
+       files -> their common name part (guide-fa + guide-en ->
+       guide). So a gist created on the GitHub website, never
+       added to the table, still clones into a readable folder
+       instead of its 32-character id. No table update needed.
+    3. Otherwise the gist id itself.
+    """
+    name = folder_name_for(gist["id"])
+    if name != gist["id"]:
+        return name
+    stems = [Path(name).stem for name in (gist.get("files") or []) if name]
+    if not stems:
+        return gist["id"]
+    if len(stems) == 1:
+        return stems[0]
+    prefix = os.path.commonprefix(stems).rstrip("-_.")
+    if len(prefix) >= 3:
+        return prefix
+    return stems[0]
 
 
 def local_gists(base):
@@ -369,7 +421,7 @@ def cmd_list(args):
     print(f"Gists for {USERNAME} ({len(gists)}):")
     for gist in gists:
         desc = gist["description"] or "(no description)"
-        print(f"  {gist['id']}  {folder_name_for(gist['id'])}  {desc}")
+        print(f"  {gist['id']}  {folder_name_for_gist(gist)}  {desc}")
     return 0
 
 
@@ -386,7 +438,7 @@ def cmd_clone(args):
     base.mkdir(parents=True, exist_ok=True)
     cloned = skipped = failed = 0
     for gist in gists:
-        target = base / folder_name_for(gist["id"])
+        target = base / folder_name_for_gist(gist)
         if target.is_dir():
             if (target / ".git").is_dir():
                 skip(f"{target.name}: already exists")
@@ -692,7 +744,7 @@ def cmd_auto(args):
     # What is missing locally?
     missing = []
     for gist in gists:
-        friendly = base / folder_name_for(gist["id"])
+        friendly = base / folder_name_for_gist(gist)
         by_id = base / gist["id"]
         if not ((friendly.is_dir() and (friendly / ".git").is_dir())
                 or (by_id.is_dir() and (by_id / ".git").is_dir())):
@@ -720,7 +772,7 @@ def cmd_auto(args):
 
     print("Found:")
     for gist in missing:
-        print(f"  {folder_name_for(gist['id'])}: missing locally, will be cloned")
+        print(f"  {folder_name_for_gist(gist)}: missing locally, will be cloned")
     for path, count in changed:
         print(f"  {path.name}: {count} file(s) changed")
     for path in loose:
@@ -735,7 +787,7 @@ def cmd_auto(args):
 
     failed = 0
     for gist in missing:
-        target = base / folder_name_for(gist["id"])
+        target = base / folder_name_for_gist(gist)
         info(f"Cloning {target.name} ({gist['id']}) ...")
         code, _out, err = run(["gh", "gist", "clone", gist["id"], str(target)])
         if code != 0:
@@ -901,7 +953,7 @@ def menu_delete(args, base):
         return
     print("Delete a gist (fresh list from GitHub):")
     for index, gist in enumerate(gists, start=1):
-        name = folder_name_for(gist["id"])
+        name = folder_name_for_gist(gist)
         desc = gist["description"] or "(no description)"
         print(f"  {index}. {name}  {desc}")
     print("  0. Back")
@@ -920,7 +972,7 @@ def menu_delete(args, base):
         error("That number is not on the list.")
         return
     gist = gists[number - 1]
-    name = folder_name_for(gist["id"])
+    name = folder_name_for_gist(gist)
     print(f"  {name}")
     print(f"  https://gist.github.com/{USERNAME}/{gist['id']}")
     if not ask_yes_no("Delete this gist from GitHub?", default=False):
@@ -940,13 +992,13 @@ def menu_delete(args, base):
 def cmd_menu(args):
     """Menu mode: only the essential tasks, with Back (0) everywhere.
 
-    Auto mode and menu mode are separate: running with no command
-    never shows this menu, and this menu never runs auto mode by
-    itself (option 1 calls it on purpose, then comes back here).
+    This is what runs when the program is started with no command.
+    Auto mode is option 1 here (or the `auto` command): it never
+    runs by itself when the menu opens.
     """
     if not sys.stdin.isatty():
         error("Menu mode needs a terminal. Run it in a terminal, "
-              "or use auto mode instead: python3 gist_sync.py")
+              "or use auto mode instead: python3 gist_sync.py auto")
         return 1
     if not check_gh() or not check_git():
         return 1
@@ -996,7 +1048,7 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="gist_sync.py",
         description="Manage your GitHub Gists from one folder you choose. "
-        "Run with no command to auto-detect changes and sync.",
+        "Run with no command to open the menu.",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -1083,6 +1135,13 @@ def build_parser():
         help="Menu mode: Auto sync, Create, Delete, About Me, Change folder.",
     )
     p_menu.set_defaults(func=cmd_menu)
+
+    p_auto = sub.add_parser(
+        "auto",
+        parents=[common],
+        help="Auto mode: detect changes and sync (also menu option 1).",
+    )
+    p_auto.set_defaults(func=cmd_auto)
     return parser
 
 
@@ -1090,8 +1149,9 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "func", None):
-        # No command given: auto mode (detect, ask once, sync).
-        args.func = cmd_auto
+        # No command given: open the menu (auto never runs
+        # by itself; it is menu option 1, or the `auto` command).
+        args.func = cmd_menu
     try:
         return args.func(args)
     except KeyboardInterrupt:
