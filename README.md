@@ -46,6 +46,24 @@ python3 gist_sync.py --base-dir ~/other-folder sync
 
 ## Usage
 
+Just run it with no command. It detects everything by itself:
+
+```bash
+python3 gist_sync.py
+```
+
+It finds what changed, what is new, what was deleted, and which
+gists are missing locally, shows one short summary, asks once
+(`Sync now? [Y/n]` — Enter means yes), and does it all. A file
+sitting directly in your gists folder (not inside a subfolder) is
+offered as a new gist: it asks public (1) or secret (2), then
+creates it, clones it into its own folder, and removes the loose
+file, because it now lives inside its gist folder. If nothing
+changed, it just says `Everything is up to date.` and does
+nothing on GitHub.
+
+The old commands still work, when you want one specific thing:
+
 ```bash
 # See all your gists on GitHub
 python3 gist_sync.py list

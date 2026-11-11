@@ -2,6 +2,10 @@
 """Manage GitHub Gists from one folder, with clean error handling.
 
 Usage (run from the VS Code integrated terminal):
+    python3 gist_sync.py
+        No command: auto mode. Detects what changed, what is new,
+        what was deleted, and what is missing locally, shows one
+        short summary, asks once, and does it all.
     python3 gist_sync.py setup
     python3 gist_sync.py list
     python3 gist_sync.py clone
@@ -35,7 +39,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
@@ -504,12 +508,72 @@ def cmd_create(args):
         return 1
     if not check_gh():
         return 1
+    base = resolve_base_dir(args)
+    if base is None:
+        return 1
+    info(f"Using folder: {base}")
+    base.mkdir(parents=True, exist_ok=True)
+    return create_gist_and_clone(args.files, args.secret, args.desc, base)
+
+
+def ask_yes_no(question, default=True):
+    """Ask a yes/no question. Enter accepts the default.
+
+    Returns the default when there is no terminal to ask in,
+    so the program never hangs waiting for input.
+    """
+    if not sys.stdin.isatty():
+        return default
+    hint = "[Y/n]" if default else "[y/N]"
+    try:
+        answer = input(f"{question} {hint} ").strip().lower()
+    except EOFError:
+        return default
+    if not answer:
+        return default
+    if answer in ("y", "yes"):
+        return True
+    if answer in ("n", "no"):
+        return False
+    return default
+
+
+def ask_public_or_secret():
+    """Ask 1 for public, 2 for secret. Default is secret (safer)."""
+    if not sys.stdin.isatty():
+        return True
+    try:
+        answer = input("Public (1) or secret (2)? [2] ").strip()
+    except EOFError:
+        return True
+    if answer == "1":
+        return False
+    return True
+
+
+def ask_description():
+    """Ask for a gist description. Enter means none."""
+    if not sys.stdin.isatty():
+        return ""
+    try:
+        return input("Description (Enter for none): ").strip()
+    except EOFError:
+        return ""
+
+
+def create_gist_and_clone(files, secret, desc, base):
+    """Create a gist from files, then clone it into base.
+
+    The local folder is named after the first file (stem), or the
+    gist id when that folder already exists. Returns 0 on success.
+    """
     cmd = ["gh", "gist", "create"]
-    # File names are passed exactly as given, so the gist keeps them.
-    cmd.extend(args.files)
-    cmd.append("--secret" if args.secret else "--public")
-    if args.desc:
-        cmd.extend(["--desc", args.desc])
+    cmd.extend(str(f) for f in files)
+    # gh has NO --secret flag: secret is its default.
+    if not secret:
+        cmd.append("--public")
+    if desc:
+        cmd.extend(["--desc", desc])
     code, out, err = run(cmd)
     if code != 0:
         fail(f"Could not create gist. {last_line(err)}")
@@ -520,14 +584,7 @@ def cmd_create(args):
     if not gist_id:
         info("Run: python3 gist_sync.py clone  to fetch it locally.")
         return 0
-    # Clone it locally so it can be managed like the others.
-    # Folder name comes from the first file you gave, not renamed.
-    base = resolve_base_dir(args)
-    if base is None:
-        return 1
-    info(f"Using folder: {base}")
-    base.mkdir(parents=True, exist_ok=True)
-    folder = Path(args.files[0]).stem or gist_id
+    folder = Path(files[0]).stem or gist_id
     target = base / folder
     if target.is_dir():
         target = base / gist_id
@@ -543,10 +600,122 @@ def cmd_create(args):
     return 0
 
 
+def loose_files(base):
+    """Files sitting directly in the gists folder, not in a subfolder.
+
+    A loose file is a new gist waiting to be created. Hidden files
+    (starting with a dot) are ignored.
+    """
+    if not base.is_dir():
+        return []
+    return sorted(
+        p for p in base.iterdir()
+        if p.is_file() and not p.name.startswith(".")
+    )
+
+
+def cmd_auto(args):
+    """No-command mode: detect everything, ask once, do it all.
+
+    - Gists on GitHub that are missing locally: cloned.
+    - Local gist folders with changed, added or deleted files,
+      or unpushed commits: synced.
+    - Files sitting directly in the gists folder: offered as new
+      gists, one by one. After a successful create the loose file
+      is removed, because it now lives inside its gist folder.
+    - Nothing to do: says so and does nothing on GitHub.
+    """
+    if not check_gh() or not check_git():
+        return 1
+    base = resolve_base_dir(args)
+    if base is None:
+        return 1
+    info(f"Using folder: {base}")
+    base.mkdir(parents=True, exist_ok=True)
+    gists = fetch_gists()
+    if gists is None:
+        return 1
+
+    # What is missing locally?
+    missing = []
+    for gist in gists:
+        friendly = base / folder_name_for(gist["id"])
+        by_id = base / gist["id"]
+        if not ((friendly.is_dir() and (friendly / ".git").is_dir())
+                or (by_id.is_dir() and (by_id / ".git").is_dir())):
+            missing.append(gist)
+
+    # What changed locally? (changed, added or deleted files,
+    # or commits that were never pushed)
+    changed = []
+    for path in local_gists(base):
+        code, out, err = run(["git", "status", "--porcelain"], cwd=path)
+        if code != 0:
+            fail(f"{path.name}: could not check status. {last_line(err)}")
+            continue
+        lines = [line for line in out.splitlines() if line.strip()]
+        ahead = unpushed_count(path)
+        if lines or (ahead is None) or (ahead or 0) > 0:
+            changed.append((path, len(lines)))
+
+    loose = loose_files(base)
+
+    if not missing and not changed and not loose:
+        ok("Everything is up to date.")
+        return 0
+
+    print("Found:")
+    for gist in missing:
+        print(f"  {folder_name_for(gist['id'])}: missing locally, will be cloned")
+    for path, count in changed:
+        print(f"  {path.name}: {count} file(s) changed")
+    for path in loose:
+        print(f"  {path.name}: new file, not in any gist yet")
+
+    if not ask_yes_no("Sync now?", default=True):
+        info("Nothing changed on GitHub.")
+        return 0
+
+    failed = 0
+    for gist in missing:
+        target = base / folder_name_for(gist["id"])
+        info(f"Cloning {target.name} ({gist['id']}) ...")
+        code, _out, err = run(["gh", "gist", "clone", gist["id"], str(target)])
+        if code != 0:
+            fail(f"{target.name}: clone failed. {last_line(err)}")
+            failed += 1
+        else:
+            ok(f"{target.name}: cloned")
+    for path, _count in changed:
+        if sync_one(path) == "fail":
+            failed += 1
+    for path in loose:
+        if not ask_yes_no(f"Create a new gist from {path.name}?", default=True):
+            skip(f"{path.name}: skipped")
+            continue
+        secret = ask_public_or_secret()
+        desc = ask_description()
+        if create_gist_and_clone([path], secret, desc, base) == 0:
+            try:
+                path.unlink()
+                ok(f"Removed the loose file {path.name}, "
+                   f"it now lives in its gist folder.")
+            except OSError as exc:
+                error(f"Could not remove the loose file {path.name}: {exc}")
+        else:
+            failed += 1
+    if failed:
+        print(f"Done, with {failed} failure(s).")
+        return 1
+    ok("Done.")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="gist_sync.py",
-        description="Manage your GitHub Gists from one folder you choose.",
+        description="Manage your GitHub Gists from one folder you choose. "
+        "Run with no command to auto-detect changes and sync.",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -633,8 +802,8 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "func", None):
-        parser.print_help()
-        return 2
+        # No command given: auto mode (detect, ask once, sync).
+        args.func = cmd_auto
     try:
         return args.func(args)
     except KeyboardInterrupt:
