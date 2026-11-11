@@ -89,7 +89,12 @@ There is no table of gist ids to folder names anywhere in the
 program. A local gist is recognised by the git remote of its
 folder, not by the folder's name, so renaming a folder yourself
 changes nothing and clone/auto never make a duplicate copy under
-a different name.
+a different name. When a folder is created (clone or create),
+the program asks for its name and shows its own suggestion as
+the default: press Enter to accept it, or type a name you like
+better. The suggestion comes from the files inside the gist —
+one file gives its name, several files give their common name
+part.
 
 ## Menu
 

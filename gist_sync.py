@@ -26,8 +26,10 @@ Rules:
     `--base-dir` only overrides it for a single run.
   - File names are NEVER renamed. Files inside a gist keep exactly
     the name they have on GitHub, or the name you gave the file
-    when you created the gist. Only the *folder* name is friendly
-    (for example "linux-cheatsheet" instead of the gist id).
+    when you created the gist. When a folder is created (clone or
+    create), the program asks for its name and shows its own
+    suggestion as the default: press Enter to accept it, or type
+    a name you like better.
   - All output is in English, so it renders correctly in the terminal.
   - No token is stored in this file. It uses your `gh` login.
   - Standard library only. No pip install needed.
@@ -46,7 +48,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
@@ -433,7 +435,9 @@ def cmd_clone(args):
             skip(f"{present[gist['id']].name}: already exists")
             skipped += 1
             continue
-        target = base / folder_name_for_gist(gist)
+        label = gist["description"] or gist["id"]
+        target = base / ask_folder_name(folder_name_for_gist(gist),
+                                        label=f"Folder name for {label}")
         if target.is_dir():
             if (target / ".git").is_dir():
                 skip(f"{target.name}: already exists")
@@ -603,6 +607,29 @@ def ask_public_or_secret():
     return True
 
 
+def ask_folder_name(suggestion, label="Folder name"):
+    """Ask for a folder name, showing the suggestion as the default.
+
+    Enter accepts the suggestion. The suggestion is what the
+    program would have used by itself (the file's name, or the
+    gist's files). When there is no terminal to ask in, the
+    suggestion is used without asking.
+    """
+    if not sys.stdin.isatty():
+        return suggestion
+    while True:
+        try:
+            answer = input(f"{label} [{suggestion}]: ").strip()
+        except EOFError:
+            return suggestion
+        if not answer:
+            return suggestion
+        if "/" in answer or "\\" in answer or answer in (".", ".."):
+            error("A folder name cannot contain / or \\. Try again.")
+            continue
+        return answer
+
+
 def ask_description():
     """Ask for a gist description. Enter means none."""
     if not sys.stdin.isatty():
@@ -617,15 +644,19 @@ def create_gist_and_clone(files, secret, desc, base, target_name=None,
                           source_folder=None):
     """Create a gist from files, then clone it into base.
 
-    The local folder is named after the first file (stem), or
-    target_name when given, or the gist id when that folder already
-    exists. Returns 0 on success.
+    The folder name is asked first, with the suggestion shown as
+    the default (Enter accepts it): the first file's name, or
+    target_name when given (the source folder's name). Files
+    inside the gist are never renamed, only the folder is.
+    Returns 0 on success.
 
     When the files came from a folder inside base (source_folder),
     that folder is moved aside while cloning, then removed: the
-    cloned folder keeps the source folder's name, with the same
-    files inside. If cloning fails, the source folder is moved back.
+    cloned folder keeps the chosen name, with the same files
+    inside. If cloning fails, the source folder is moved back.
     """
+    suggestion = target_name or Path(files[0]).stem or ""
+    folder = ask_folder_name(suggestion) if suggestion else ""
     cmd = ["gh", "gist", "create"]
     cmd.extend(str(f) for f in files)
     # gh has NO --secret flag: secret is its default.
@@ -643,7 +674,8 @@ def create_gist_and_clone(files, secret, desc, base, target_name=None,
     if not gist_id:
         info("Run: python3 gist_sync.py clone  to fetch it locally.")
         return 0
-    folder = target_name or Path(files[0]).stem or gist_id
+    if not folder:
+        folder = gist_id
     target = base / folder
     moved_aside = None
     if target.is_dir():
@@ -672,6 +704,9 @@ def create_gist_and_clone(files, secret, desc, base, target_name=None,
         return 1
     if moved_aside is not None:
         shutil.rmtree(moved_aside, ignore_errors=True)
+    elif source_folder is not None and source_folder.is_dir():
+        # The folder was renamed: its files now live in the clone.
+        shutil.rmtree(source_folder, ignore_errors=True)
     ok(f"Cloned locally to: {target}")
     return 0
 
@@ -779,7 +814,9 @@ def cmd_auto(args):
 
     failed = 0
     for gist in missing:
-        target = base / folder_name_for_gist(gist)
+        label = gist["description"] or gist["id"]
+        target = base / ask_folder_name(folder_name_for_gist(gist),
+                                        label=f"Folder name for {label}")
         info(f"Cloning {target.name} ({gist['id']}) ...")
         code, _out, err = run(["gh", "gist", "clone", gist["id"], str(target)])
         if code != 0:
