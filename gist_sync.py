@@ -6,6 +6,10 @@ Usage (run from the VS Code integrated terminal):
         No command: auto mode. Detects what changed, what is new,
         what was deleted, and what is missing locally, shows one
         short summary, asks once, and does it all.
+    python3 gist_sync.py menu
+        Menu mode: only the essential tasks (Auto sync, Create,
+        Delete, About Me), with Back (0) everywhere. Auto mode
+        and menu mode are separate and never mix.
     python3 gist_sync.py setup
     python3 gist_sync.py list
     python3 gist_sync.py clone
@@ -39,7 +43,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
@@ -561,11 +565,18 @@ def ask_description():
         return ""
 
 
-def create_gist_and_clone(files, secret, desc, base):
+def create_gist_and_clone(files, secret, desc, base, target_name=None,
+                          source_folder=None):
     """Create a gist from files, then clone it into base.
 
-    The local folder is named after the first file (stem), or the
-    gist id when that folder already exists. Returns 0 on success.
+    The local folder is named after the first file (stem), or
+    target_name when given, or the gist id when that folder already
+    exists. Returns 0 on success.
+
+    When the files came from a folder inside base (source_folder),
+    that folder is moved aside while cloning, then removed: the
+    cloned folder keeps the source folder's name, with the same
+    files inside. If cloning fails, the source folder is moved back.
     """
     cmd = ["gh", "gist", "create"]
     cmd.extend(str(f) for f in files)
@@ -584,10 +595,20 @@ def create_gist_and_clone(files, secret, desc, base):
     if not gist_id:
         info("Run: python3 gist_sync.py clone  to fetch it locally.")
         return 0
-    folder = Path(files[0]).stem or gist_id
+    folder = target_name or Path(files[0]).stem or gist_id
     target = base / folder
+    moved_aside = None
     if target.is_dir():
-        target = base / gist_id
+        if source_folder is not None and target == source_folder:
+            # Move the source folder aside so clone can take its name.
+            moved_aside = base / (".gist-sync-tmp-" + folder)
+            try:
+                source_folder.rename(moved_aside)
+            except OSError as exc:
+                error(f"Could not move the folder aside: {exc}")
+                return 1
+        else:
+            target = base / gist_id
     if target.is_dir():
         info(f"Local folder already exists: {target}")
         return 0
@@ -595,7 +616,14 @@ def create_gist_and_clone(files, secret, desc, base):
     if code != 0:
         fail(f"Created on GitHub, but clone failed. {last_line(err)}")
         info("Run: python3 gist_sync.py clone  to fetch it locally.")
+        if moved_aside is not None:
+            try:
+                moved_aside.rename(source_folder)
+            except OSError:
+                pass
         return 1
+    if moved_aside is not None:
+        shutil.rmtree(moved_aside, ignore_errors=True)
     ok(f"Cloned locally to: {target}")
     return 0
 
@@ -614,6 +642,28 @@ def loose_files(base):
     )
 
 
+def loose_folders(base):
+    """Subfolders of base that are not gists yet (no .git inside).
+
+    A folder with files in it is a new multi-file gist waiting to
+    be created: all its files become one gist. Hidden folders and
+    empty folders are ignored.
+    """
+    if not base.is_dir():
+        return []
+    folders = []
+    for path in sorted(base.iterdir()):
+        if not path.is_dir() or path.name.startswith("."):
+            continue
+        if (path / ".git").is_dir():
+            continue
+        files = [p for p in path.iterdir()
+                 if p.is_file() and not p.name.startswith(".")]
+        if files:
+            folders.append((path, sorted(files)))
+    return folders
+
+
 def cmd_auto(args):
     """No-command mode: detect everything, ask once, do it all.
 
@@ -623,6 +673,8 @@ def cmd_auto(args):
     - Files sitting directly in the gists folder: offered as new
       gists, one by one. After a successful create the loose file
       is removed, because it now lives inside its gist folder.
+    - Folders sitting directly in the gists folder (not gists
+      yet): offered as new multi-file gists, one gist per folder.
     - Nothing to do: says so and does nothing on GitHub.
     """
     if not check_gh() or not check_git():
@@ -659,8 +711,9 @@ def cmd_auto(args):
             changed.append((path, len(lines)))
 
     loose = loose_files(base)
+    folders = loose_folders(base)
 
-    if not missing and not changed and not loose:
+    if not missing and not changed and not loose and not folders:
         ok("Everything is up to date.")
         return 0
 
@@ -671,6 +724,9 @@ def cmd_auto(args):
         print(f"  {path.name}: {count} file(s) changed")
     for path in loose:
         print(f"  {path.name}: new file, not in any gist yet")
+    for path, files in folders:
+        print(f"  {path.name}/: new folder with {len(files)} file(s), "
+              f"not a gist yet")
 
     if not ask_yes_no("Sync now?", default=True):
         info("Nothing changed on GitHub.")
@@ -704,11 +760,225 @@ def cmd_auto(args):
                 error(f"Could not remove the loose file {path.name}: {exc}")
         else:
             failed += 1
+    for path, files in folders:
+        label = f"{path.name}/ ({len(files)} file(s))"
+        if not ask_yes_no(f"Create a new gist from {label}?", default=True):
+            skip(f"{path.name}: skipped")
+            continue
+        secret = ask_public_or_secret()
+        desc = ask_description()
+        if create_gist_and_clone(files, secret, desc, base,
+                                 target_name=path.name,
+                                 source_folder=path) != 0:
+            failed += 1
     if failed:
         print(f"Done, with {failed} failure(s).")
         return 1
     ok("Done.")
     return 0
+
+
+def wait_for_enter():
+    """Pause so the user can read the output, then go back to the menu."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        input("Press Enter to go back to the menu. ")
+    except EOFError:
+        return
+
+
+def resolve_menu_path(answer, base):
+    """Resolve a file/folder name the user typed in the menu.
+
+    Accepts a full path, a path relative to the current folder,
+    or just a name inside the gists folder. Returns a Path or None.
+    """
+    text = (answer or "").strip()
+    if not text:
+        return None
+    candidate = Path(text)
+    if candidate.exists():
+        return candidate
+    in_base = base / text
+    if in_base.exists():
+        return in_base
+    return None
+
+
+def menu_about():
+    """Show the About Me section with the user's social links."""
+    print("About Me")
+    print("  Erffan_hub")
+    print("  Telegram: https://t.me/erffan_hub")
+    print("  X: https://x.com/Erffanhub_00")
+    print("  GitHub: https://github.com/erffanhub-00")
+    print("  Gist: https://gist.github.com/erffanhub-00")
+
+
+def menu_create(args, base):
+    """Create a new gist from the menu: one file, or one folder.
+
+    A folder becomes ONE gist with all its files inside, so a
+    Persian + English pair stays together like git-cheatsheet.
+    0 goes back to the menu.
+    """
+    print("Create a new gist")
+    print("  1. From one file")
+    print("  2. From a folder (all files become one gist)")
+    print("  0. Back")
+    try:
+        choice = input("Choose [0-2]: ").strip()
+    except EOFError:
+        return
+    if choice == "0" or not choice:
+        return
+    if choice not in ("1", "2"):
+        error("Choose 0, 1 or 2.")
+        return
+    if choice == "1":
+        try:
+            answer = input("File name (in your gists folder, or full path): ")
+        except EOFError:
+            return
+        path = resolve_menu_path(answer, base)
+        if path is None or not path.is_file():
+            error("File not found. Check the name and try again.")
+            return
+        files = [path]
+        target_name = None
+        source_folder = None
+    else:
+        try:
+            answer = input("Folder name (in your gists folder, or full path): ")
+        except EOFError:
+            return
+        folder = resolve_menu_path(answer, base)
+        if folder is None or not folder.is_dir():
+            error("Folder not found. Check the name and try again.")
+            return
+        if (folder / ".git").is_dir():
+            error("That folder is already a gist.")
+            return
+        files = sorted(p for p in folder.iterdir()
+                       if p.is_file() and not p.name.startswith("."))
+        if not files:
+            error("That folder has no files in it.")
+            return
+        target_name = folder.name
+        source_folder = folder
+    secret = ask_public_or_secret()
+    desc = ask_description()
+    result = create_gist_and_clone(files, secret, desc, base,
+                                   target_name=target_name,
+                                   source_folder=source_folder)
+    if result == 0 and choice == "1" and path.parent == base:
+        # The file was a loose file in the gists folder: it now
+        # lives inside its gist folder, so remove the loose copy
+        # (same as auto mode does). Files from anywhere else
+        # are left alone.
+        try:
+            path.unlink()
+            ok(f"Removed the loose file {path.name}, "
+               f"it now lives in its gist folder.")
+        except OSError as exc:
+            error(f"Could not remove the loose file {path.name}: {exc}")
+
+
+def menu_delete(args, base):
+    """Delete a gist, picked from the FRESHEST list from GitHub.
+
+    The list is fetched from GitHub right now, never from a saved
+    or local list, so it is always up to date. 0 goes back to the
+    menu. Deleting asks once more, with No as the default.
+    """
+    gists = fetch_gists()
+    if gists is None:
+        return
+    if not gists:
+        info("No gists found on GitHub.")
+        return
+    print("Delete a gist (fresh list from GitHub):")
+    for index, gist in enumerate(gists, start=1):
+        name = folder_name_for(gist["id"])
+        desc = gist["description"] or "(no description)"
+        print(f"  {index}. {name}  {desc}")
+    print("  0. Back")
+    try:
+        choice = input("Choose a gist to delete [0 Back]: ").strip()
+    except EOFError:
+        return
+    if choice == "0" or not choice:
+        return
+    try:
+        number = int(choice)
+    except ValueError:
+        error("Choose a number from the list.")
+        return
+    if not 1 <= number <= len(gists):
+        error("That number is not on the list.")
+        return
+    gist = gists[number - 1]
+    name = folder_name_for(gist["id"])
+    print(f"  {name}")
+    print(f"  https://gist.github.com/{USERNAME}/{gist['id']}")
+    if not ask_yes_no("Delete this gist from GitHub?", default=False):
+        info("Nothing deleted.")
+        return
+    code, _out, err = run(["gh", "gist", "delete", gist["id"], "--yes"])
+    if code != 0:
+        fail(f"Could not delete the gist. {last_line(err)}")
+        return
+    ok(f"Deleted gist: {name}")
+    for folder in (base / name, base / gist["id"]):
+        if folder.is_dir():
+            shutil.rmtree(folder, ignore_errors=True)
+            ok(f"Removed the local folder: {folder.name}")
+
+
+def cmd_menu(args):
+    """Menu mode: only the essential tasks, with Back (0) everywhere.
+
+    Auto mode and menu mode are separate: running with no command
+    never shows this menu, and this menu never runs auto mode by
+    itself (option 1 calls it on purpose, then comes back here).
+    """
+    if not sys.stdin.isatty():
+        error("Menu mode needs a terminal. Run it in a terminal, "
+              "or use auto mode instead: python3 gist_sync.py")
+        return 1
+    if not check_gh() or not check_git():
+        return 1
+    base = resolve_base_dir(args)
+    if base is None:
+        return 1
+    info(f"Using folder: {base}")
+    while True:
+        print(f"=== gist-sync {__version__} ===")
+        print("  1. Auto sync")
+        print("  2. Create new gist")
+        print("  3. Delete a gist")
+        print("  4. About Me")
+        print("  0. Exit")
+        try:
+            choice = input("Choose [0-4]: ").strip()
+        except EOFError:
+            print()
+            return 0
+        if choice == "0":
+            return 0
+        if choice == "1":
+            cmd_auto(args)
+        elif choice == "2":
+            menu_create(args, base)
+        elif choice == "3":
+            menu_delete(args, base)
+        elif choice == "4":
+            menu_about()
+        else:
+            error("Choose 0, 1, 2, 3 or 4.")
+            continue
+        wait_for_enter()
 
 
 def build_parser():
@@ -795,6 +1065,13 @@ def build_parser():
         help="Create a secret (unlisted) gist. Default is public.",
     )
     p_create.set_defaults(func=cmd_create)
+
+    p_menu = sub.add_parser(
+        "menu",
+        parents=[common],
+        help="Menu mode: Auto sync, Create, Delete, About Me.",
+    )
+    p_menu.set_defaults(func=cmd_menu)
     return parser
 
 

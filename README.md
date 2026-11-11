@@ -62,6 +62,31 @@ file, because it now lives inside its gist folder. If nothing
 changed, it just says `Everything is up to date.` and does
 nothing on GitHub.
 
+## Menu
+
+Auto mode and menu mode are separate and never mix. The menu is
+only there when you ask for it:
+
+```bash
+python3 gist_sync.py menu
+```
+
+```
+=== gist-sync ===
+  1. Auto sync
+  2. Create new gist
+  3. Delete a gist
+  4. About Me
+  0. Exit
+```
+
+After each task it goes back to the menu (`0` goes back or
+exits). Create works from one file, or from one folder whose
+files all become a single gist. Delete fetches the freshest list
+from GitHub first, you pick a gist by number, and it asks once
+more (No is the default) before deleting it from GitHub and
+removing its local folder. About Me shows the social links.
+
 The old commands still work, when you want one specific thing:
 
 ```bash
