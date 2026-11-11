@@ -77,6 +77,7 @@ python3 gist_sync.py menu
   2. Create new gist
   3. Delete a gist
   4. About Me
+  5. Change gists folder
   0. Exit
 ```
 
@@ -86,6 +87,8 @@ files all become a single gist. Delete fetches the freshest list
 from GitHub first, you pick a gist by number, and it asks once
 more (No is the default) before deleting it from GitHub and
 removing its local folder. About Me shows the social links.
+Change gists folder asks for the new folder and saves it; the
+files in the old folder stay where they are.
 
 The old commands still work, when you want one specific thing:
 

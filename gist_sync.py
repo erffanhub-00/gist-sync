@@ -8,8 +8,9 @@ Usage (run from the VS Code integrated terminal):
         short summary, asks once, and does it all.
     python3 gist_sync.py menu
         Menu mode: only the essential tasks (Auto sync, Create,
-        Delete, About Me), with Back (0) everywhere. Auto mode
-        and menu mode are separate and never mix.
+        Delete, About Me, Change gists folder), with Back (0)
+        everywhere. Auto mode and menu mode are separate and
+        never mix.
     python3 gist_sync.py setup
     python3 gist_sync.py list
     python3 gist_sync.py clone
@@ -43,7 +44,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
@@ -959,9 +960,10 @@ def cmd_menu(args):
         print("  2. Create new gist")
         print("  3. Delete a gist")
         print("  4. About Me")
+        print("  5. Change gists folder")
         print("  0. Exit")
         try:
-            choice = input("Choose [0-4]: ").strip()
+            choice = input("Choose [0-5]: ").strip()
         except EOFError:
             print()
             return 0
@@ -975,8 +977,17 @@ def cmd_menu(args):
             menu_delete(args, base)
         elif choice == "4":
             menu_about()
+        elif choice == "5":
+            cmd_setup(args)
+            # The folder may have changed: use the new choice
+            # for the rest of this menu session. The old
+            # folder's files are never moved by the program.
+            new_base = resolve_base_dir(args)
+            if new_base is not None:
+                base = new_base
+                info(f"Using folder: {base}")
         else:
-            error("Choose 0, 1, 2, 3 or 4.")
+            error("Choose 0, 1, 2, 3, 4 or 5.")
             continue
         wait_for_enter()
 
@@ -1069,7 +1080,7 @@ def build_parser():
     p_menu = sub.add_parser(
         "menu",
         parents=[common],
-        help="Menu mode: Auto sync, Create, Delete, About Me.",
+        help="Menu mode: Auto sync, Create, Delete, About Me, Change folder.",
     )
     p_menu.set_defaults(func=cmd_menu)
     return parser
