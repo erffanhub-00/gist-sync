@@ -195,6 +195,23 @@ its git remote, not by its folder name.
 Lists are paged 10 per page, and Delete always fetches the freshest
 list from GitHub.
 
+**`git commit failed: unable to auto-detect email address`?**
+git on this machine does not know your name and email yet. Run
+once, then run again — nothing is lost, the change is still there:
+
+```bash
+git config --global user.name "Erffan_hub"
+git config --global user.email "erffanhub-00@users.noreply.github.com"
+```
+
+Or use your own email instead of the noreply address. (Your exact
+noreply address is in GitHub Settings → Emails.)
+
+**A file shows many insertions and deletions, but I barely changed it?**
+That is usually a line-ending change (the whole file rewritten with
+LF instead of CRLF, or the other way round). Auto sync labels it
+`(line endings/whitespace only)` — the content is the same.
+
 **Something failed. Did I lose my change?**
 No. A failed push leaves the commit unpushed, and the next run
 retries it. A failed pull leaves your local files untouched.

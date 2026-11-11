@@ -55,7 +55,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
@@ -261,6 +261,22 @@ def _flush_stdin():
             termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
     except Exception:
         pass
+
+
+def is_whitespace_only(path, lines):
+    """True when the change is only whitespace / line endings.
+
+    A new (untracked) file is always a real change, so any '??'
+    line means False. Otherwise `git diff --ignore-all-space`
+    says whether anything but whitespace changed.
+    """
+    for line in lines:
+        if line.startswith("??"):
+            return False
+    code, _out, _err = run(
+        ["git", "diff", "--quiet", "--ignore-all-space"], cwd=path
+    )
+    return code == 0
 
 
 def sync_counts(path):
@@ -638,12 +654,22 @@ def sync_one(path):
             fail(f"{name}: git add failed. {last_line(err)}")
             return "fail"
         # Nothing staged (for example only ignored files changed).
-        code, _out, _err = run(["git", "diff", "--cached", "--quiet"], cwd=path)
+        code, _out, err = run(["git", "diff", "--cached", "--quiet"], cwd=path)
         if code != 0:
             message = f"auto update: {datetime.now():%Y-%m-%d %H:%M}"
             code, _out, err = run(["git", "commit", "-m", message], cwd=path)
             if code != 0:
                 fail(f"{name}: git commit failed. {last_line(err)}")
+                if "unable to auto-detect email address" in err:
+                    # git has no name/email on this machine yet.
+                    # Nothing is lost: the change is still there,
+                    # and the next run retries the commit.
+                    error("git does not know who you are. Run once:")
+                    error('  git config --global user.name "Erffan_hub"')
+                    error('  git config --global user.email '
+                          '"erffanhub-00@users.noreply.github.com"')
+                    error("Or use your own email instead of the "
+                          "noreply address, then run again.")
                 return "fail"
             committed = True
     if not committed and ahead == 0:
@@ -912,7 +938,8 @@ def cmd_auto(args):
         if lines or (ahead is None) or (ahead or 0) > 0 or (behind or 0) > 0:
             changed.append(
                 {"path": path, "lines": lines,
-                 "ahead": ahead, "behind": behind}
+                 "ahead": ahead, "behind": behind,
+                 "ws_only": bool(lines) and is_whitespace_only(path, lines)}
             )
 
     loose = loose_files(base)
@@ -932,7 +959,10 @@ def cmd_auto(args):
             shown = ", ".join(names[:5])
             if len(names) > 5:
                 shown += f", ... and {len(names) - 5} more"
-            parts.append(f"{len(names)} file(s) changed: {shown}")
+            label = f"{len(names)} file(s) changed: {shown}"
+            if item["ws_only"]:
+                label += " (line endings/whitespace only)"
+            parts.append(label)
         if (item["ahead"] or 0) > 0:
             parts.append(f"{item['ahead']} commit(s) not pushed yet")
         if item["ahead"] is None:
@@ -957,6 +987,9 @@ def cmd_auto(args):
             code, out, _err = run(["git", "diff", "--stat"], cwd=path)
             if code == 0 and out.strip():
                 print(out.rstrip())
+            if item["ws_only"]:
+                print("  (Only line endings/whitespace changed — "
+                      "the content is the same.)")
             if (item["behind"] or 0) > 0:
                 code, out, _err = run(
                     ["git", "log", "--oneline", "HEAD..@{u}"], cwd=path
