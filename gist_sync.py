@@ -39,35 +39,25 @@ via `sudo pacman -S github-cli git`, plus `gh auth login`.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 USERNAME = "erffanhub-00"
 DEFAULT_BASE = Path.home() / "gists"
 CONFIG_PATH = Path.home() / ".config" / "gist-sync" / "config.json"
 
-# Friendly folder names for the 7 older gists.
-# Keys are the FULL 32-character gist ids GitHub returns.
-# (v1.1.0 used short 8-character ids for Hermes and Tree, which is
-# why those two cloned under their full ids instead. Fixed in v1.1.1.)
-# This table is ONLY for these older gists. A gist created later
-# does NOT need an entry here: when cloning, its folder name comes
-# from the files inside the gist (see folder_name_for_gist).
-# Files inside each folder are NOT renamed, only the folder is.
-FRIENDLY_FOLDERS = {
-    "91ca6cf9de61fbd124926103387507f8": "hermes",
-    "d8f291636141e097d66f2a93a3982cbe": "tree-prompt",
-    "25a903f2ee822b97c9132ef0e80186f1": "git-cheatsheet",
-    "7fcbf8721443ea30143bc76d40c21747": "linux-cheatsheet",
-    "708d3c1617d9d044873536179f878c36": "powershell-cheatsheet",
-    "2c1ba425a3ca0b937937368e94b9cb46": "docker-cheatsheet",
-    "b9defe688de21764d08e613a68953836": "omarchy-guide",
-}
+# There is NO table of gist ids to folder names in this file.
+# A gist is recognised locally by the git remote of its folder
+# (see local_gist_map), so a folder keeps working whatever it is
+# called, and a new folder is named from the files inside the
+# gist (see folder_name_for_gist). Nothing here ever needs to be
+# updated when a gist is added.
 
 
 def info(message):
@@ -306,8 +296,7 @@ def fetch_gists():
     """Return a list of {'id', 'description', 'files'}, or None on error.
 
     'files' is the list of file names inside the gist, as GitHub
-    reports them. It is used to name the local folder of a gist
-    that has no entry in FRIENDLY_FOLDERS.
+    reports them. It is used to name the local folder when cloning.
     """
     code, out, err = run(["gh", "api", f"users/{USERNAME}/gists?per_page=100"])
     if code != 0:
@@ -357,38 +346,16 @@ def fetch_gists():
     return gists
 
 
-def folder_name_for(gist_id):
-    """Friendly folder name for a known gist, else the gist id itself.
-
-    Exact match first. As a fallback, a short id also matches when
-    it is a prefix of a known full id (at least 8 characters), and
-    vice versa, so old short ids keep working too.
-    """
-    if gist_id in FRIENDLY_FOLDERS:
-        return FRIENDLY_FOLDERS[gist_id]
-    for known_id, name in FRIENDLY_FOLDERS.items():
-        if len(gist_id) >= 8 and known_id.startswith(gist_id):
-            return name
-        if len(known_id) >= 8 and gist_id.startswith(known_id):
-            return name
-    return gist_id
-
-
 def folder_name_for_gist(gist):
-    """Friendly folder name for a gist dict from fetch_gists.
+    """Folder name for a gist dict from fetch_gists.
 
-    1. The FRIENDLY_FOLDERS table (the 7 older gists).
-    2. Otherwise the files inside the gist: one file -> its name
-       without the extension (my-guide.md -> my-guide); several
-       files -> their common name part (guide-fa + guide-en ->
-       guide). So a gist created on the GitHub website, never
-       added to the table, still clones into a readable folder
-       instead of its 32-character id. No table update needed.
-    3. Otherwise the gist id itself.
+    The name comes from the files inside the gist: one file ->
+    its name without the extension (my-guide.md -> my-guide);
+    several files -> their common name part (guide-fa + guide-en
+    -> guide). So a gist created on the GitHub website still
+    clones into a readable folder instead of its 32-character
+    id. Otherwise (no files listed) the gist id itself.
     """
-    name = folder_name_for(gist["id"])
-    if name != gist["id"]:
-        return name
     stems = [Path(name).stem for name in (gist.get("files") or []) if name]
     if not stems:
         return gist["id"]
@@ -407,6 +374,29 @@ def local_gists(base):
     return sorted(
         p for p in base.iterdir() if p.is_dir() and (p / ".git").is_dir()
     )
+
+
+def local_gist_map(base):
+    """Map gist id -> local folder, from each folder's git remote.
+
+    A gist folder is recognised by the remote it was cloned from
+    (https://gist.github.com/<user>/<id>.git), NOT by its folder
+    name. So a folder keeps working whatever it is called -- an
+    old name like "hermes", a file-based name, or even the raw
+    32-character id -- and clone/auto never make a duplicate
+    copy under a different name.
+    """
+    mapping = {}
+    for path in local_gists(base):
+        code, out, _err = run(
+            ["git", "config", "--get", "remote.origin.url"], cwd=path
+        )
+        if code != 0:
+            continue
+        match = re.search(r"[0-9a-f]{32}", out)
+        if match:
+            mapping[match.group(0)] = path
+    return mapping
 
 
 def cmd_list(args):
@@ -436,8 +426,13 @@ def cmd_clone(args):
         return 1
     info(f"Using folder: {base}")
     base.mkdir(parents=True, exist_ok=True)
+    present = local_gist_map(base)
     cloned = skipped = failed = 0
     for gist in gists:
+        if gist["id"] in present:
+            skip(f"{present[gist['id']].name}: already exists")
+            skipped += 1
+            continue
         target = base / folder_name_for_gist(gist)
         if target.is_dir():
             if (target / ".git").is_dir():
@@ -741,14 +736,11 @@ def cmd_auto(args):
     if gists is None:
         return 1
 
-    # What is missing locally?
-    missing = []
-    for gist in gists:
-        friendly = base / folder_name_for_gist(gist)
-        by_id = base / gist["id"]
-        if not ((friendly.is_dir() and (friendly / ".git").is_dir())
-                or (by_id.is_dir() and (by_id / ".git").is_dir())):
-            missing.append(gist)
+    # What is missing locally? A gist is present when a local
+    # folder's git remote points at it, whatever the folder is
+    # called (see local_gist_map).
+    present = local_gist_map(base)
+    missing = [gist for gist in gists if gist["id"] not in present]
 
     # What changed locally? (changed, added or deleted files,
     # or commits that were never pushed)
@@ -983,10 +975,15 @@ def menu_delete(args, base):
         fail(f"Could not delete the gist. {last_line(err)}")
         return
     ok(f"Deleted gist: {name}")
-    for folder in (base / name, base / gist["id"]):
-        if folder.is_dir():
-            shutil.rmtree(folder, ignore_errors=True)
-            ok(f"Removed the local folder: {folder.name}")
+    folder = local_gist_map(base).get(gist["id"])
+    if folder is not None and folder.is_dir():
+        shutil.rmtree(folder, ignore_errors=True)
+        ok(f"Removed the local folder: {folder.name}")
+    else:
+        for folder in (base / name, base / gist["id"]):
+            if folder.is_dir():
+                shutil.rmtree(folder, ignore_errors=True)
+                ok(f"Removed the local folder: {folder.name}")
 
 
 def cmd_menu(args):

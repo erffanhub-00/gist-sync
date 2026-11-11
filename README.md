@@ -81,10 +81,15 @@ sitting directly in your gists folder works the same way, as one
 multi-file gist. If nothing changed, it just says
 `Everything is up to date.` and does nothing on GitHub.
 
-A gist created on the GitHub website (not in the program's
-folder-name table) still clones into a readable folder: its name
-comes from the files inside it — one file gives its name, several
-files give their common name part.
+A gist created on the GitHub website still clones into a readable
+folder: its name comes from the files inside it — one file gives
+its name, several files give their common name part.
+
+There is no table of gist ids to folder names anywhere in the
+program. A local gist is recognised by the git remote of its
+folder, not by the folder's name, so renaming a folder yourself
+changes nothing and clone/auto never make a duplicate copy under
+a different name.
 
 ## Menu
 
@@ -107,7 +112,7 @@ The old commands still work, when you want one specific thing:
 # See all your gists on GitHub
 python3 gist_sync.py list
 
-# Clone all your gists into your chosen folder (friendly folder names, files unchanged)
+# Clone all your gists into your chosen folder (folder names come from the gist files, files unchanged)
 python3 gist_sync.py clone
 
 # Show which local gists have unpushed changes
